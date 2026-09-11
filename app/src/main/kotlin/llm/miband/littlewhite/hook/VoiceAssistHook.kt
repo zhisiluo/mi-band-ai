@@ -42,6 +42,10 @@ class VoiceAssistHook(
                 LogCollector.w(tag, "等待超时仍拿不到宿主 Context，跳过（不影响手环原始回答）")
                 return@Thread
             }
+            // 补一次日志落盘初始化：MainModule.onPackageLoaded 时机过早，
+            // ActivityThread.currentApplication() 常为 null，导致宿主进程 LogCollector.init 未生效；
+            // 此处已稳定拿到宿主 Context，落盘到 <宿主 cacheDir>/logs/llm.log，绕过 log.tag=E 的 logcat 过滤。
+            LogCollector.init(c)
             XiaoaiAgentServer.start(classLoader, c)
             FastXiaoaiEngine.init(classLoader, config)
             installToastCapture()

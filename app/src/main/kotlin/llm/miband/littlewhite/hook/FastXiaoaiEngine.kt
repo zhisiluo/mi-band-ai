@@ -25,6 +25,9 @@ object FastXiaoaiEngine {
     private const val WAIT_MS = 15_000L
     private const val MAX_ANSWER_LEN = 100
 
+    /** 静默收口窗口：已聚合到内容后，若超过该时长无新分片，即按现有内容完成（短答案无句末标点/无 <FINAL> 时兜底） */
+    private const val IDLE_FINISH_MS = 1_500L
+
     private var classLoader: ClassLoader? = null
     private var config: ConfigStore? = null
 
@@ -34,6 +37,7 @@ object FastXiaoaiEngine {
         val sb = StringBuilder()
         val result = AtomicReference<String?>(null)
         @Volatile var inputQuery: String = ""
+        @Volatile var lastChunkAt: Long = 0L
     }
 
     private val waiter = AtomicReference<Waiter?>(null)
@@ -49,8 +53,9 @@ object FastXiaoaiEngine {
         if (dialogId.isEmpty() || text == null) return
         val cur = w.dialog.get()
         if (cur == null) w.dialog.set(dialogId) else if (cur != dialogId) return
-        // 手机端会把注入的 query 作为首个分片回显；累积前若首片包含原始问题，判为回显丢弃
-        if (w.sb.isEmpty() && w.inputQuery.isNotEmpty() && text.contains(w.inputQuery)) {
+        // 手机端会把注入的 query 作为首个分片回显；仅当首片"恰好等于"原始问题才判为回显丢弃。
+        // 不能用 contains/startsWith：答案以问题开头时（如问"你好"答"你好呀…"）会误删首个有效分片。
+        if (w.sb.isEmpty() && w.inputQuery.isNotEmpty() && text.trim() == w.inputQuery) {
             LogCollector.i(TAG, "跳过回显分片 len=${text.length}")
             return
         }
@@ -59,6 +64,7 @@ object FastXiaoaiEngine {
             text == "<FINAL>" -> finish(w)
             text.isNotEmpty() -> {
                 w.sb.append(text)
+                w.lastChunkAt = System.currentTimeMillis()
                 val s = w.sb
                 // 够长、或已累积成句且以句末标点收尾，即完成（后台常无独立 <FINAL> 分片）
                 if (s.length >= MAX_ANSWER_LEN ||
@@ -74,6 +80,33 @@ object FastXiaoaiEngine {
         if (w.result.get() != null) return
         w.result.set(cleanAndTruncate(w.sb.toString()))
         w.latch.countDown()
+    }
+
+    /**
+     * 静默收口看门狗：部分短答案（如"1+1等于2"）无句末标点、也不会收到 <FINAL>，
+     * 旧逻辑只能干等到 WAIT_MS 超时。这里在已聚合到内容后，若 IDLE_FINISH_MS 内无新分片，
+     * 即认为流已结束并按现有内容完成。仅在 sb 非空时才收口，避免把纯回显当成答案。
+     */
+    private fun startIdleWatchdog(w: Waiter) {
+        val deadline = System.currentTimeMillis() + WAIT_MS + 1_000L
+        Thread({
+            while (true) {
+                try {
+                    Thread.sleep(200)
+                } catch (_: Throwable) {
+                    return@Thread
+                }
+                if (w.latch.count == 0L) return@Thread
+                if (System.currentTimeMillis() > deadline) return@Thread
+                if (w.sb.isEmpty()) continue
+                val last = w.lastChunkAt
+                if (last > 0 && System.currentTimeMillis() - last >= IDLE_FINISH_MS) {
+                    LogCollector.i(TAG, "静默 ${IDLE_FINISH_MS}ms 无新分片，按已聚合内容收口 len=${w.sb.length}")
+                    finish(w)
+                    return@Thread
+                }
+            }
+        }, "FastXiaoaiIdle").apply { isDaemon = true }.start()
     }
 
     /** H0 入站路径：fullName 以 Template 开头时投递（ToastStream 分片 / Toast 单条） */
@@ -113,6 +146,7 @@ object FastXiaoaiEngine {
         val w = Waiter()
         w.inputQuery = query
         waiter.set(w)
+        startIdleWatchdog(w)
         try {
             if (!inject(cl, query)) {
                 waiter.set(null)

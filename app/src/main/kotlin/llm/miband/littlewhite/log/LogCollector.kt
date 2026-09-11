@@ -77,6 +77,10 @@ object LogCollector {
     /** 保护文件选择与写入的锁：保证并发写入整批日志不交错 */
     private val fileLock = Any()
 
+    /** 惰性初始化节流：上次尝试从 ActivityThread 反查 Application 的时间戳（毫秒） */
+    @Volatile
+    private var lastLazyInitMs = 0L
+
     /**
      * 初始化日志文件路径。重复调用幂等：路径未变化时直接返回。
      *
@@ -96,6 +100,27 @@ object LogCollector {
             } catch (_: Throwable) {
                 null // 目录创建失败时仅保留内存缓冲
             }
+        }
+    }
+
+    /**
+     * 兜底惰性初始化：Hook 宿主进程里 [init] 可能因调用时机过早（Application 尚未就绪）
+     * 而失败，导致日志只进内存无法落盘。此处在真正记录日志时尝试通过反射
+     * ActivityThread.currentApplication() 反查宿主 Context 并补一次 [init]；
+     * 失败则节流重试（每 2s 最多一次），成功后再调用 [init] 幂等返回。
+     */
+    private fun ensureFileReady() {
+        if (logFile != null) return
+        val now = System.currentTimeMillis()
+        if (now - lastLazyInitMs < 2000L) return
+        lastLazyInitMs = now
+        try {
+            val app = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication")
+                .invoke(null) as? Context
+            if (app != null) init(app)
+        } catch (_: Throwable) {
+            // 反射不可用（如非 Android 环境）时静默跳过
         }
     }
 
@@ -124,6 +149,7 @@ object LogCollector {
         val safe = sanitize(msg)
         val lines = buildLines(level, tag, safe)
         appendBuffer(lines)
+        ensureFileReady()
         appendFile(lines)
         // logcat 桥接：便于开发期用 adb 过滤查看（内容已脱敏）
         when (level) {
