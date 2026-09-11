@@ -2,8 +2,10 @@ package llm.miband.littlewhite.hook
 
 import llm.miband.littlewhite.config.ConfigStore
 import llm.miband.littlewhite.log.LogCollector
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -25,55 +27,121 @@ object FastXiaoaiEngine {
     private const val WAIT_MS = 15_000L
     private const val MAX_ANSWER_LEN = 100
 
-    /** 静默收口窗口：已聚合到内容后，若超过该时长无新分片，即按现有内容完成（短答案无句末标点/无 <FINAL> 时兜底） */
+    /** 静默收口窗口：已聚合到内容后，若超过该时长无新分片，即按现有内容完成 */
     private const val IDLE_FINISH_MS = 1_500L
+
+    /**
+     * 回显判定阈值：累积分片与注入文本至少重合这么多字符，才认定为「小爱回显回放」。
+     * 取 12 是为了避免把恰好以「你/你是」开头的真实答案误判成回显而丢掉首字。
+     */
+    private const val ECHO_MIN_MATCH = 12
+
+    /** 未认领的 waiter 只在该时长内接受分片接管，避免上一条请求的迟到分片污染新请求 */
+    private const val CLAIM_WINDOW_MS = 10_000L
 
     private var classLoader: ClassLoader? = null
     private var config: ConfigStore? = null
 
-    private class Waiter {
+    private class Waiter(val id: Int) {
         val latch = CountDownLatch(1)
         val dialog = AtomicReference<String?>(null)
         val sb = StringBuilder()
+        /** 回显回放缓冲：累积到与注入文本分叉为止，分叉前的部分一律丢弃 */
+        val echoBuf = StringBuilder()
         val result = AtomicReference<String?>(null)
         @Volatile var inputQuery: String = ""
+        @Volatile var injectedQuery: String = ""
+        @Volatile var echoDone: Boolean = false
         @Volatile var lastChunkAt: Long = 0L
+        val createdAt: Long = System.currentTimeMillis()
     }
 
-    private val waiter = AtomicReference<Waiter?>(null)
+    /**
+     * 并发等待槽。桥服务端是多线程（每个连接一个线程），同一时刻可能有多条请求在途。
+     * 旧实现用单个 AtomicReference，新请求直接顶掉旧请求，导致旧请求一个分片都收不到、干等超时。
+     * 现改为：按 dialog_id 路由，未认领的空槽由最早创建的 waiter 顺序接管。
+     */
+    private val pending = ConcurrentHashMap<Int, Waiter>()
+    private val seq = AtomicInteger(0)
 
     fun init(cl: ClassLoader, cfg: ConfigStore) {
         classLoader = cl
         config = cfg
     }
 
-    /** 共享聚合：按注入后首个 dialog_id 累积分片，<FINAL> 或够长即完成；跳过回显首片 */
+    /**
+     * 归属分片到具体 waiter：
+     *  1) 已认领该 dialog_id 的 waiter 直接命中（同一请求的后续分片）；
+     *  2) 分片内容恰好是某未认领 waiter 注入文本的前缀 → 这是小爱回显，按内容精确认领，
+     *     并发下不会张冠李戴；
+     *  3) 兜底：最早创建且未认领、且仍在认领窗口内的 waiter（无回显场景）。
+     */
+    private fun route(dialogId: String, text: String): Waiter? {
+        val list = pending.values.sortedBy { it.id }
+        list.firstOrNull { it.dialog.get() == dialogId }?.let { return it }
+        list.firstOrNull { it.dialog.get() == null && it.injectedQuery.startsWith(text) }?.let { w ->
+            if (w.dialog.compareAndSet(null, dialogId)) return w
+        }
+        val free = list.firstOrNull {
+            it.dialog.get() == null && System.currentTimeMillis() - it.createdAt <= CLAIM_WINDOW_MS
+        } ?: return null
+        return if (free.dialog.compareAndSet(null, dialogId)) free else null
+    }
+
+    /** 共享聚合：按 dialog_id 归入对应 waiter，剥离回显后 <FINAL> 或够长即完成 */
     private fun feedChunk(dialogId: String, text: String?) {
-        val w = waiter.get() ?: return
-        if (dialogId.isEmpty() || text == null) return
-        val cur = w.dialog.get()
-        if (cur == null) w.dialog.set(dialogId) else if (cur != dialogId) return
-        // 手机端会把注入的 query 作为首个分片回显；仅当首片"恰好等于"原始问题才判为回显丢弃。
-        // 不能用 contains/startsWith：答案以问题开头时（如问"你好"答"你好呀…"）会误删首个有效分片。
-        if (w.sb.isEmpty() && w.inputQuery.isNotEmpty() && text.trim() == w.inputQuery) {
-            LogCollector.i(TAG, "跳过回显分片 len=${text.length}")
+        if (dialogId.isEmpty() || text.isNullOrEmpty()) return
+        val w = route(dialogId, text) ?: return
+        if (w.echoDone || w.injectedQuery.isEmpty()) {
+            appendAnswer(w, dialogId, text)
             return
         }
-        LogCollector.i(TAG, "chunk dlg=${dialogId.take(8)} len=${text.length} t=${text.take(40)}")
-        when {
-            text == "<FINAL>" -> finish(w)
-            text.isNotEmpty() -> {
-                w.sb.append(text)
-                w.lastChunkAt = System.currentTimeMillis()
-                val s = w.sb
-                // 够长、或已累积成句且以句末标点收尾，即完成（后台常无独立 <FINAL> 分片）
-                if (s.length >= MAX_ANSWER_LEN ||
-                    (s.length >= 24 && s.last() in "。！？!?")
-                ) {
-                    finish(w)
-                }
-            }
+        // 小爱会把注入的整段 query（系统提示词 + 「用户问题：xxx」）原样回显成若干分片。
+        // 累积比对注入文本：仍是其前缀 → 纯回显，丢弃；分叉 → 剥掉前缀，尾巴才是真实答案。
+        w.echoBuf.append(text)
+        val cpl = commonPrefixLen(w.echoBuf, w.injectedQuery)
+        if (cpl >= w.echoBuf.length) {
+            if (w.echoBuf.length >= w.injectedQuery.length) w.echoDone = true
+            LogCollector.i(TAG, "#${w.id} 跳过回显分片 len=${text.length}")
+            return
         }
+        w.echoDone = true
+        if (cpl >= ECHO_MIN_MATCH) {
+            val tail = w.echoBuf.substring(cpl)
+            w.echoBuf.setLength(0)
+            LogCollector.i(TAG, "#${w.id} 剥离回显前缀 ${cpl} 字，剩余答案 len=${tail.length}")
+            if (tail.isNotEmpty()) appendAnswer(w, dialogId, tail)
+        } else {
+            // 与注入文本几乎不重合：本条本就没有回显，整段都是答案
+            val buf = w.echoBuf.toString()
+            w.echoBuf.setLength(0)
+            appendAnswer(w, dialogId, buf)
+        }
+    }
+
+    private fun appendAnswer(w: Waiter, dialogId: String, text: String) {
+        if (text.isEmpty()) return
+        if (text == "<FINAL>") {
+            finish(w)
+            return
+        }
+        LogCollector.i(TAG, "#${w.id} chunk dlg=${dialogId.take(8)} len=${text.length} t=${text.take(40)}")
+        w.sb.append(text)
+        w.lastChunkAt = System.currentTimeMillis()
+        val s = w.sb
+        // 够长、或已累积成句且以句末标点收尾，即完成（后台常无独立 <FINAL> 分片）
+        if (s.length >= MAX_ANSWER_LEN ||
+            (s.length >= 24 && s.last() in "。！？!?")
+        ) {
+            finish(w)
+        }
+    }
+
+    private fun commonPrefixLen(a: CharSequence, b: String): Int {
+        val n = minOf(a.length, b.length)
+        var i = 0
+        while (i < n && a[i] == b[i]) i++
+        return i
     }
 
     private fun finish(w: Waiter) {
@@ -101,7 +169,7 @@ object FastXiaoaiEngine {
                 if (w.sb.isEmpty()) continue
                 val last = w.lastChunkAt
                 if (last > 0 && System.currentTimeMillis() - last >= IDLE_FINISH_MS) {
-                    LogCollector.i(TAG, "静默 ${IDLE_FINISH_MS}ms 无新分片，按已聚合内容收口 len=${w.sb.length}")
+                    LogCollector.i(TAG, "#${w.id} 静默 ${IDLE_FINISH_MS}ms 无新分片，按已聚合内容收口 len=${w.sb.length}")
                     finish(w)
                     return@Thread
                 }
@@ -143,31 +211,35 @@ object FastXiaoaiEngine {
     fun ask(query: String): String? {
         val cl = classLoader ?: return null
         if (query.isBlank()) return null
-        val w = Waiter()
+        val w = Waiter(seq.incrementAndGet())
         w.inputQuery = query
-        waiter.set(w)
+        w.injectedQuery = buildInjectedQuery(query)
+        pending[w.id] = w
         startIdleWatchdog(w)
         try {
-            if (!inject(cl, query)) {
-                waiter.set(null)
+            if (!inject(cl, w.injectedQuery)) {
                 return null
             }
             val ok = w.latch.await(WAIT_MS, TimeUnit.MILLISECONDS)
             val ans = if (ok) w.result.get() else null
-            if (ans == null) LogCollector.w(TAG, "fast 注入后未聚合到流式回答")
+            if (ans == null) LogCollector.w(TAG, "#${w.id} fast 注入后未聚合到流式回答 query=${query.take(20)}")
             return ans
         } catch (t: Throwable) {
-            LogCollector.e(TAG, "ask 异常", t)
+            LogCollector.e(TAG, "#${w.id} ask 异常", t)
             return null
         } finally {
-            waiter.compareAndSet(w, null)
+            pending.remove(w.id)
         }
     }
 
-    /** 把系统提示词并入 query 前缀（小爱无 system_prompt 字段），再反射 sendNlpRequest 注入 */
-    private fun inject(cl: ClassLoader, query: String): Boolean = try {
+    /** 把系统提示词并入 query 前缀（小爱无 system_prompt 字段）；该整段会被回显，由 feedChunk 剥离 */
+    private fun buildInjectedQuery(query: String): String {
         val sys = config?.getSystemPrompt()?.trim().orEmpty()
-        val prefixed = if (sys.isEmpty()) query else "$sys\n用户问题：$query"
+        return if (sys.isEmpty()) query else "$sys\n用户问题：$query"
+    }
+
+    /** 反射 sendNlpRequest 注入（入参已是拼好提示词的完整文本） */
+    private fun inject(cl: ClassLoader, prefixed: String): Boolean = try {
         val m0 = cl.loadClass("v51.m0")
         val builderCls = cl.loadClass("v51.m0\$e")
         val dCls = cl.loadClass("v51.m0\$d")
@@ -180,7 +252,7 @@ object FastXiaoaiEngine {
         }
         val params = builderCls.getMethod("build").invoke(builder)
         m0.getMethod("sendNlpRequest", dCls).invoke(null, params)
-        LogCollector.i(TAG, "fast 注入 sendNlpRequest 成功 query=${query.take(30)}")
+        LogCollector.i(TAG, "fast 注入 sendNlpRequest 成功 query=${prefixed.take(24)}…")
         true
     } catch (t: Throwable) {
         LogCollector.e(TAG, "fast 注入失败(v51.m0 类名可能随版本变)", t)
