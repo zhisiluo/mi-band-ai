@@ -113,6 +113,12 @@ class WebSocketMessageProcessor(private val config: ConfigStore) {
         private const val MAX_COMMAND_IDS = 50
         private const val TAG = "WsProcessor"
 
+        /** 手端小爱无回答后、重试前的等待时长：等手机端进程重启后 TCP 桥服务端重新就绪 */
+        private const val BRIDGE_RETRY_DELAY_MS = 500L
+
+        /** 重试单次超时上限：避免首次失败已耗尽超时后，重试把设备侧等待窗口撑爆 */
+        private const val BRIDGE_RETRY_TIMEOUT_MS = 5_000
+
         // 消息命名空间/名称常量（与小米 AI 协议一致）
         private const val NS_SPEECH_RECOGNIZER = "SpeechRecognizer"
         private const val NAME_RECOGNIZE_RESULT = "RecognizeResult"
@@ -309,10 +315,30 @@ class WebSocketMessageProcessor(private val config: ConfigStore) {
                     val timeout = config.getTimeoutMs().toInt().coerceIn(3_000, 20_000)
                     val engine = config.getXiaoaiEngine()
                     var a = XiaoaiAgentClient.ask(queryText, engine, timeout)
-                    // miclaw 失败自动回退 fast（fast 仍失败则 a=null，放行原始 Toast）
+                    // miclaw 失败自动回退 fast（fast 仍失败则 a=null，进入下方重试/兜底）
                     if (a == null && engine != "fast") {
                         LogCollector.i(tag, "miclaw 无回答，回退 fast dialogId=$dialogId")
                         a = XiaoaiAgentClient.ask(queryText, "fast", timeout)
+                    }
+                    // 手机端 voiceassist 被回收/重启会让 TCP 桥瞬态断开：等待其服务端重新就绪后用 fast 重试一次
+                    // （用 fast 而非 engine：engine=miclaw 时首次已回退 fast，重试 miclaw 只会再撞 20003 计费拒绝）
+                    if (a == null) {
+                        LogCollector.i(tag, "手端小爱无回答，${BRIDGE_RETRY_DELAY_MS}ms 后用 fast 重试 dialogId=$dialogId")
+                        try {
+                            Thread.sleep(BRIDGE_RETRY_DELAY_MS)
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                        }
+                        a = XiaoaiAgentClient.ask(
+                            queryText,
+                            "fast",
+                            timeout.coerceAtMost(BRIDGE_RETRY_TIMEOUT_MS),
+                        )
+                    }
+                    // 重试仍无回答时用自配 LLM 兜底，保证每次都有回复
+                    if (a == null && config.getApiKey().isNotBlank()) {
+                        LogCollector.i(tag, "手端小爱重试仍无回答，回退自配 LLM dialogId=$dialogId")
+                        a = LlmClient.ask(dialogId, queryText)
                     }
                     a
                 } else {
