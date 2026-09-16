@@ -6,8 +6,6 @@ import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import llm.miband.littlewhite.config.ConfigStore
-import llm.miband.littlewhite.hook.LlmClient
-import llm.miband.littlewhite.hook.MiHealthHook
 import llm.miband.littlewhite.hook.VoiceAssistHook
 import llm.miband.littlewhite.log.LogCollector
 
@@ -20,9 +18,11 @@ import llm.miband.littlewhite.log.LogCollector
  * 因此本类必须在清单/资源中保持无参可实例化（混淆规则中已保留）。
  *
  * 职责：
- * - [onModuleLoaded]：早于一切包回调触发，幂等初始化 ConfigStore 与 LlmClient；
- * - [onPackageLoaded]：包名匹配 com.mi.health 时装配 [MiHealthHook]，
- *   由它在宿主进程内安装 WebSocket 消息拦截层（方案 A 文本层 + 方案 C 稳定兜底）。
+ * - [onModuleLoaded]：早于一切包回调触发，幂等初始化 ConfigStore；
+ * - [onPackageLoaded]：包名匹配 com.miui.voiceassist 时装配 [VoiceAssistHook]，
+ *   在超级小爱主进程内接入本机小爱引擎，并对外暴露 OpenAI 兼容 HTTP 接口。
+ *
+ * 说明：原先面向小米运动健康（com.mi.health）的手环 WebSocket 注入分支已整体移除。
  */
 class MainModule : XposedModule() {
 
@@ -36,20 +36,17 @@ class MainModule : XposedModule() {
 
     /**
      * 包加载回调：按宿主包名分发安装对应 Hook（API 29+ 触发）。
-     * - com.mi.health        -> MiHealthHook（手环 AIVS 拦截 + 回答替换，既有）
-     * - com.miui.voiceassist -> VoiceAssistHook（作为手机端小爱回答引擎，本次新增）
+     * - com.miui.voiceassist -> VoiceAssistHook（本机小爱引擎 + OpenAI 兼容接口）
      */
     override fun onPackageLoaded(param: PackageLoadedParam) {
-        if (param.packageName != TARGET_MI_HEALTH && param.packageName != TARGET_VOICE_ASSIST) return
+        if (param.packageName != TARGET_VOICE_ASSIST) return
         log(Log.INFO, TAG, "目标包已加载: ${param.packageName}")
 
-        // 确保配置/LlmClient 就绪（onModuleLoaded 若未先触发则在此补齐）
+        // 确保配置就绪（onModuleLoaded 若未先触发则在此补齐）
         ensureInitialized()
 
         // 尽量拿宿主 Context 落盘日志；拿不到时 LogCollector 退回内存+logcat，不影响主流程
         hostContext()?.let { LogCollector.init(it) }
-        // 延迟补偿宿主 Context 注入
-        LlmClient.setHostContext(hostContext())
 
         val cfg = config
         if (cfg == null) {
@@ -58,10 +55,7 @@ class MainModule : XposedModule() {
         }
         try {
             val classLoader = param.getDefaultClassLoader()
-            when (param.packageName) {
-                TARGET_MI_HEALTH -> MiHealthHook(this, cfg, classLoader).install()
-                TARGET_VOICE_ASSIST -> VoiceAssistHook(this, cfg, classLoader).install()
-            }
+            VoiceAssistHook(this, cfg, classLoader).install()
             log(Log.INFO, TAG, "${param.packageName} Hook 安装流程已触发")
         } catch (t: Throwable) {
             log(Log.ERROR, TAG, "${param.packageName} Hook 安装异常", t)
@@ -77,7 +71,7 @@ class MainModule : XposedModule() {
     }
 
     /**
-     * 幂等初始化：ConfigStore(fromModule) + LlmClient.init。
+     * 幂等初始化：ConfigStore(fromModule)。
      * 仅执行一次；[onModuleLoaded] 与 [onPackageLoaded] 谁先到谁完成它。
      */
     private fun ensureInitialized() {
@@ -86,13 +80,11 @@ class MainModule : XposedModule() {
             if (initialized) return
             initialized = true
             try {
-                val cfg = ConfigStore.fromModule(this)
-                config = cfg
-                LlmClient.init(cfg, hostContext())
-                log(Log.INFO, TAG, "配置与 LlmClient 初始化完成")
+                config = ConfigStore.fromModule(this)
+                log(Log.INFO, TAG, "配置初始化完成")
             } catch (t: Throwable) {
                 // 初始化失败则放行后续逻辑（config 维持 null，由调用方兜底跳过）
-                log(Log.ERROR, TAG, "配置/LlmClient 初始化异常", t)
+                log(Log.ERROR, TAG, "配置初始化异常", t)
             }
         }
     }
@@ -110,8 +102,6 @@ class MainModule : XposedModule() {
 
     private companion object {
         const val TAG = "环上LLM"
-        /** 小米运动健康（手环 AIVS 宿主） */
-        const val TARGET_MI_HEALTH = "com.mi.health"
         /** 超级小爱（手机端小爱回答引擎宿主） */
         const val TARGET_VOICE_ASSIST = "com.miui.voiceassist"
     }

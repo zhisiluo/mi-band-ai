@@ -8,13 +8,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * 环上LLM —— 配置预设管理（按分组独立保存/删除/应用）
+ * 环上LLM —— 配置预设管理（保存 / 删除 / 应用）
  *
- * 分组（category）：
- * - "api"        ：API 相关（api_type / base_url / api_key / model）
- * - "generation" ：生成参数（temperature / top_p / top_k / thinking_mode /
- *                   reasoning_effort / system_prompt / timeout_ms / max_tokens）
- * - "session"    ：会话设置（context_mode / context_window_ms / context_length）
+ * 模块整体转型为「超级小爱转 OpenAI 兼容接口」后，可预设的配置只剩服务端一组：
+ * 监听端口、局域网开关、访问令牌、默认引擎、回答长度上限、各引擎等待上限、
+ * system / history 透传开关与内置系统提示词。
  *
  * 预设只保存在模块 App 本地（SharedPreferences "llm_presets"），
  * Hook 进程不读取预设，只读取 [ConfigStore] 中实际生效的配置 ——
@@ -25,12 +23,8 @@ object PresetManager {
     private const val PREFS_NAME = "llm_presets"
     private const val KEY_PREFIX = "preset_"
 
-    /** 分组常量，供 UI 与键映射引用 */
-    const val CATEGORY_API = "api"
-    const val CATEGORY_GENERATION = "generation"
-    const val CATEGORY_SESSION = "session"
-    /** 回答模式分组（默认模式 / 切换时长 / 指令词库） */
-    const val CATEGORY_MODE = "mode"
+    /** 服务端配置分组（唯一分组） */
+    const val CATEGORY_SERVER = "server"
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -100,44 +94,24 @@ object PresetManager {
         return p.contains(keyOf(category, name.trim()))
     }
 
+    // ==================== 导出当前配置 ====================
+
     /**
-     * 导出某分组当前配置为「键 -> 字符串值」映射（供保存预设）。
-     * 各键值取自 [ConfigStore] 的类型化 getter，统一字符串化：
-     * 空/未设置的数值型（temperature/top_p/top_k）导出为空串，应用时解析为 null。
+     * 导出当前服务端配置为「键 -> 字符串值」映射（供保存预设）。
+     * 各键值取自 [ConfigStore] 的类型化 getter，统一字符串化。
      */
     fun exportValues(config: ConfigStore, category: String): Map<String, String> = when (category) {
-        CATEGORY_API -> linkedMapOf(
-            ConfigKeys.KEY_API_TYPE to config.getApiType(),
-            ConfigKeys.KEY_BASE_URL to config.getBaseUrl(),
-            ConfigKeys.KEY_API_KEY to config.getApiKey(),
-            ConfigKeys.KEY_MODEL to config.getModel(),
-            ConfigKeys.KEY_APPEND_API_PATH to config.isAppendApiPath().toString(),
-        )
-        CATEGORY_GENERATION -> linkedMapOf(
-            ConfigKeys.KEY_TEMPERATURE to (config.getTemperature()?.toString() ?: ""),
-            ConfigKeys.KEY_TOP_P to (config.getTopP()?.toString() ?: ""),
-            ConfigKeys.KEY_TOP_K to (config.getTopK()?.toString() ?: ""),
-            ConfigKeys.KEY_THINKING_MODE to config.isThinkingMode().toString(),
-            ConfigKeys.KEY_REASONING_EFFORT to config.getReasoningEffort(),
+        CATEGORY_SERVER -> linkedMapOf(
+            ConfigKeys.KEY_OPENAI_PORT to config.getOpenAiPort().toString(),
+            ConfigKeys.KEY_OPENAI_LAN to config.isOpenAiLan().toString(),
+            ConfigKeys.KEY_OPENAI_TOKEN to config.getOpenAiToken(),
+            ConfigKeys.KEY_XIAOAI_ENGINE to config.getXiaoaiEngine(),
+            ConfigKeys.KEY_OPENAI_MAX_ANSWER_LEN to config.getOpenAiMaxAnswerLen().toString(),
+            ConfigKeys.KEY_FAST_WAIT_MS to config.getFastWaitMs().toString(),
+            ConfigKeys.KEY_MICLAW_WAIT_MS to config.getMiclawWaitMs().toString(),
+            ConfigKeys.KEY_OPENAI_FORWARD_SYSTEM to config.isOpenAiForwardSystem().toString(),
+            ConfigKeys.KEY_OPENAI_FORWARD_HISTORY to config.isOpenAiForwardHistory().toString(),
             ConfigKeys.KEY_SYSTEM_PROMPT to config.getSystemPrompt(),
-            ConfigKeys.KEY_TIMEOUT_MS to config.getTimeoutMs().toString(),
-            ConfigKeys.KEY_MAX_TOKENS to config.getMaxTokens().toString(),
-            ConfigKeys.KEY_THINKING_TIMEOUT_MS to config.getThinkingTimeoutMs().toString(),
-            ConfigKeys.KEY_THINKING_MAX_TOKENS to config.getThinkingMaxTokens().toString(),
-        )
-        CATEGORY_SESSION -> linkedMapOf(
-            ConfigKeys.KEY_CONTEXT_MODE to config.getContextMode(),
-            ConfigKeys.KEY_CONTEXT_WINDOW_MS to config.getContextWindowMs().toString(),
-            ConfigKeys.KEY_CONTEXT_LENGTH to config.getContextLength().toString(),
-        )
-        CATEGORY_MODE -> linkedMapOf(
-            ConfigKeys.KEY_DEFAULT_MODE to config.getDefaultMode(),
-            ConfigKeys.KEY_XIAOAI_MODE_MS to config.getXiaoaiModeMs().toString(),
-            ConfigKeys.KEY_LLM_MODE_MS to config.getLlmModeMs().toString(),
-            ConfigKeys.KEY_CMD_TO_LLM to config.getCmdToLlm().joinToString("\n"),
-            ConfigKeys.KEY_CMD_TO_XIAOAI to config.getCmdToXiaoai().joinToString("\n"),
-            ConfigKeys.KEY_CMD_QUERY_MODE to config.getCmdQueryMode().joinToString("\n"),
-            ConfigKeys.KEY_INTERCEPT_GENERAL to config.getInterceptGeneral().toString(),
         )
         else -> emptyMap()
     }
@@ -152,43 +126,22 @@ object PresetManager {
     fun applyPreset(config: ConfigStore, values: Map<String, String>) {
         values.forEach { (key, value) ->
             when (key) {
-                ConfigKeys.KEY_API_TYPE -> config.setApiType(value)
-                ConfigKeys.KEY_BASE_URL -> config.setBaseUrl(value)
-                ConfigKeys.KEY_API_KEY -> config.setApiKey(value)
-                ConfigKeys.KEY_MODEL -> config.setModel(value)
-                ConfigKeys.KEY_APPEND_API_PATH -> config.setAppendApiPath(value == "true")
-                ConfigKeys.KEY_TEMPERATURE -> config.setTemperature(value.toFloatOrNull())
-                ConfigKeys.KEY_TOP_P -> config.setTopP(value.toFloatOrNull())
-                ConfigKeys.KEY_TOP_K -> config.setTopK(value.toIntOrNull())
-                ConfigKeys.KEY_THINKING_MODE -> config.setThinkingMode(value == "true")
-                ConfigKeys.KEY_REASONING_EFFORT -> config.setReasoningEffort(value)
+                ConfigKeys.KEY_OPENAI_PORT ->
+                    value.toIntOrNull()?.let { config.setOpenAiPort(it) }
+                ConfigKeys.KEY_OPENAI_LAN -> config.setOpenAiLan(value == "true")
+                ConfigKeys.KEY_OPENAI_TOKEN -> config.setOpenAiToken(value)
+                ConfigKeys.KEY_XIAOAI_ENGINE -> config.setXiaoaiEngine(value)
+                ConfigKeys.KEY_OPENAI_MAX_ANSWER_LEN ->
+                    value.toIntOrNull()?.let { config.setOpenAiMaxAnswerLen(it) }
+                ConfigKeys.KEY_FAST_WAIT_MS ->
+                    value.toLongOrNull()?.let { config.setFastWaitMs(it) }
+                ConfigKeys.KEY_MICLAW_WAIT_MS ->
+                    value.toLongOrNull()?.let { config.setMiclawWaitMs(it) }
+                ConfigKeys.KEY_OPENAI_FORWARD_SYSTEM -> config.setOpenAiForwardSystem(value == "true")
+                ConfigKeys.KEY_OPENAI_FORWARD_HISTORY -> config.setOpenAiForwardHistory(value == "true")
                 ConfigKeys.KEY_SYSTEM_PROMPT -> config.setSystemPrompt(value)
-                ConfigKeys.KEY_TIMEOUT_MS -> config.setTimeoutMs(value.toIntOrNull() ?: ConfigKeys.DEFAULT_TIMEOUT_MS)
-                ConfigKeys.KEY_MAX_TOKENS -> config.setMaxTokens(value.toIntOrNull() ?: ConfigKeys.DEFAULT_MAX_TOKENS)
-                ConfigKeys.KEY_THINKING_TIMEOUT_MS ->
-                    config.setThinkingTimeoutMs(value.toIntOrNull() ?: ConfigKeys.DEFAULT_THINKING_TIMEOUT_MS)
-                ConfigKeys.KEY_THINKING_MAX_TOKENS ->
-                    config.setThinkingMaxTokens(value.toIntOrNull() ?: ConfigKeys.DEFAULT_THINKING_MAX_TOKENS)
-                ConfigKeys.KEY_CONTEXT_MODE -> config.setContextMode(value)
-                ConfigKeys.KEY_CONTEXT_WINDOW_MS ->
-                    config.setContextWindowMs(value.toIntOrNull() ?: ConfigKeys.DEFAULT_CONTEXT_WINDOW_MS)
-                ConfigKeys.KEY_CONTEXT_LENGTH ->
-                    config.setContextLength(value.toIntOrNull() ?: ConfigKeys.DEFAULT_CONTEXT_LENGTH)
-                ConfigKeys.KEY_DEFAULT_MODE -> config.setDefaultMode(value)
-                ConfigKeys.KEY_XIAOAI_MODE_MS ->
-                    config.setXiaoaiModeMs(value.toLongOrNull() ?: ConfigKeys.DEFAULT_XIAOAI_MODE_MS)
-                ConfigKeys.KEY_LLM_MODE_MS ->
-                    config.setLlmModeMs(value.toLongOrNull() ?: ConfigKeys.DEFAULT_LLM_MODE_MS)
-                ConfigKeys.KEY_CMD_TO_LLM -> config.setCmdToLlm(splitWords(value))
-                ConfigKeys.KEY_CMD_TO_XIAOAI -> config.setCmdToXiaoai(splitWords(value))
-                ConfigKeys.KEY_CMD_QUERY_MODE -> config.setCmdQueryMode(splitWords(value))
-                ConfigKeys.KEY_INTERCEPT_GENERAL -> config.setInterceptGeneral(value == "true")
                 // 其他键（如 enabled）不参与预设
             }
         }
     }
-
-    /** 把多行指令词串拆分为非空列表（trim + 去空） */
-    private fun splitWords(raw: String): List<String> =
-        raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
 }

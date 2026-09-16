@@ -3,6 +3,8 @@
 package llm.miband.littlewhite.ui
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Paint
 import android.net.Uri
@@ -62,11 +64,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.libxposed.service.HookedTarget
 import io.github.libxposed.service.XposedService
+import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.URL
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import llm.miband.littlewhite.LsposedBinding
+import llm.miband.littlewhite.config.ConfigKeys
 import llm.miband.littlewhite.config.ConfigStore
 import llm.miband.littlewhite.config.PresetManager
 import llm.miband.littlewhite.config.StatsStore
@@ -310,7 +319,7 @@ fun SettingsScreen(
                 when (page) {
                     0 -> StatusTabContent(binding = binding, context = context, contentPadding = contentPadding)
                     1 -> ConfigTabContent(config = config, context = context, scope = scope, contentPadding = contentPadding)
-                    2 -> StatsTabContent(context = context, scope = scope, contentPadding = contentPadding)
+                    2 -> StatsTabContent(config = config, context = context, scope = scope, contentPadding = contentPadding)
                     3 -> AboutTabContent(config = config, context = context, scope = scope, contentPadding = contentPadding, onOpenThemePage = onOpenThemePage)
                 }
             }
@@ -957,7 +966,7 @@ private fun ConfigTabContent(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "LSPosed 未激活\n请在 LSPosed 管理器中启用本模块后\n配置 API 参数",
+                text = "LSPosed 未激活\n请在 LSPosed 管理器中启用本模块后\n配置接口服务参数",
                 textAlign = TextAlign.Center,
                 fontSize = MiuixTheme.textStyles.body2.fontSize,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -971,93 +980,51 @@ private fun ConfigTabContent(
             state = listState,
             contentPadding = contentPadding,
         ) {
-            // ---------- 分组 1：基本设置 ----------
-            item(key = "basic") {
-                // refreshTick 用于 key() 包裹配置输入控件；应用预设后自增，
-                // 使输入框内部的 remember 状态重置并重新从 ConfigStore 读取
+            // ---------- 分组 1：接口服务 ----------
+            item(key = "serverTitle") {
+                SmallTitle("接口服务")
+            }
+            item(key = "server") {
                 var refreshTick by remember { mutableStateOf(0) }
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
                     key(refreshTick) {
-                        // 受控组件（Switch/Dropdown）用本地状态驱动 UI，回调时同时写回 config，
-                        // 避免非响应式 RemotePreferences 读取导致界面不更新
+                        // 受控组件用本地 state 驱动 UI：RemotePreferences 的读取不具备响应性，
+                        // 若直接以 config 值作为 checked 会出现"点了不刷新"的问题
                         var enabled by remember { mutableStateOf(config.isEnabled()) }
                         SwitchPreference(
                             title = "启用模块",
-                            summary = "关闭后 Hook 不再替换手环小爱回答",
+                            summary = "关闭后不再注入超级小爱，OpenAI 兼容接口服务同时停止",
                             checked = enabled,
                             onCheckedChange = {
                                 enabled = it
                                 config.setEnabled(it)
                             },
                         )
-                        var usePhoneXiaoai by remember { mutableStateOf(config.getUsePhoneXiaoai()) }
-                        SwitchPreference(
-                            title = "用手端小爱回答",
-                            summary = "开启后手环提问转交手机端超级小爱(osbot)处理，无需配置 API；关闭则用上方 Base URL/模型",
-                            checked = usePhoneXiaoai,
-                            onCheckedChange = {
-                                usePhoneXiaoai = it
-                                config.setUsePhoneXiaoai(it)
-                            },
+                        NumberInputField(
+                            label = "监听端口",
+                            initialValue = config.getOpenAiPort(),
+                            onValueChange = { config.setOpenAiPort(it) },
                         )
-                        if (usePhoneXiaoai) {
-                            var engineIndex by remember {
-                                mutableStateOf(if (config.getXiaoaiEngine().trim().lowercase() == "fast") 1 else 0)
-                            }
-                            OverlayDropdownPreference(
-                                title = "手端引擎",
-                                summary = "miclaw=小爱大模型(需小米账号登录)；fast=手机端传统云端",
-                                items = listOf("miclaw(大模型)", "fast(快速)"),
-                                selectedIndex = engineIndex,
-                                onSelectedIndexChange = { index ->
-                                    engineIndex = index
-                                    config.setXiaoaiEngine(if (index == 1) "fast" else "miclaw")
-                                },
-                            )
-                        }
-                        var apiTypeIndex by remember {
-                            mutableStateOf(if (config.getApiType().trim().lowercase() == "anthropic") 1 else 0)
-                        }
-                        OverlayDropdownPreference(
-                            title = "API 类型",
-                            summary = "openai 兼容 / anthropic",
-                            items = listOf("openai", "anthropic"),
-                            selectedIndex = apiTypeIndex,
-                            onSelectedIndexChange = { index ->
-                                apiTypeIndex = index
-                                config.setApiType(if (index == 1) "anthropic" else "openai")
+                        var lan by remember { mutableStateOf(config.isOpenAiLan()) }
+                        SwitchPreference(
+                            title = "允许局域网访问",
+                            summary = "开启后监听 0.0.0.0，同一 WiFi 下其它设备可调用；关闭仅监听 127.0.0.1。修改后需重启超级小爱生效",
+                            checked = lan,
+                            onCheckedChange = {
+                                lan = it
+                                config.setOpenAiLan(it)
                             },
                         )
                         TextInputField(
-                            initialValue = config.getBaseUrl(),
-                            label = "Base URL",
-                            placeholder = "https://api.deepseek.com",
-                            onValueChange = { config.setBaseUrl(it) },
-                        )
-                        var appendApiPath by remember { mutableStateOf(config.isAppendApiPath()) }
-                        SwitchPreference(
-                            title = "自动拼接 API 路径",
-                            summary = "开启：自动补全 /v1/chat/completions 或 /v1/messages；关闭：Base URL 作为完整地址直接使用",
-                            checked = appendApiPath,
-                            onCheckedChange = {
-                                appendApiPath = it
-                                config.setAppendApiPath(it)
-                            },
-                        )
-                        ApiKeyField(
-                            initialValue = config.getApiKey(),
-                            onValueChange = { config.setApiKey(it) },
-                        )
-                        TextInputField(
-                            initialValue = config.getModel(),
-                            label = "模型",
-                            placeholder = "deepseek-v4-flash",
-                            onValueChange = { config.setModel(it) },
+                            initialValue = config.getOpenAiToken(),
+                            label = "访问令牌（留空=不鉴权）",
+                            placeholder = "填写后请求需带 Authorization: Bearer <令牌>",
+                            onValueChange = { config.setOpenAiToken(it) },
                         )
                     }
                     PresetSection(
-                        category = PresetManager.CATEGORY_API,
-                        title = "API 配置",
+                        category = PresetManager.CATEGORY_SERVER,
+                        title = "接口服务",
                         config = config,
                         context = context,
                         onPresetApplied = { refreshTick++ },
@@ -1065,218 +1032,73 @@ private fun ConfigTabContent(
                 }
             }
 
-            // ---------- 分组 2：回答模式（语音指令切换小爱 / LLM） ----------
-            item(key = "modeTitle") {
-                SmallTitle("回答模式")
+            // ---------- 分组 2：回答引擎 ----------
+            item(key = "engineTitle") {
+                SmallTitle("回答引擎")
             }
-            item(key = "mode") {
-                var refreshTick by remember { mutableStateOf(0) }
-                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    // 受控组件（OverlayDropdown/Switch）必须由本地 state 驱动显示：
-                    // 直接用 config 读取作为 checked/selectedIndex，写 config 不触发重组，
-                    // 会导致"点了没反应"。state 声明在 key(refreshTick) 内，应用预设刷新时
-                    // 整个子树重建、回读 config 最新值，保证显示与配置一致。
-                    key(refreshTick) {
-                        var defaultMode by remember { mutableStateOf(config.getDefaultMode().trim().lowercase()) }
-                        var interceptGeneral by remember { mutableStateOf(config.getInterceptGeneral()) }
-                        OverlayDropdownPreference(
-                            title = "默认回答模式",
-                            summary = "无指令时默认由谁回答",
-                            items = listOf("LLM 接管", "小爱接管"),
-                            selectedIndex = if (defaultMode == "xiaoai") 1 else 0,
-                            onSelectedIndexChange = { index ->
-                                defaultMode = if (index == 1) "xiaoai" else "llm"
-                                config.setDefaultMode(defaultMode)
-                            },
-                        )
-                        NumberInputField(
-                            label = "小爱模式持续时长（分钟，0=永久）",
-                            initialValue = (config.getXiaoaiModeMs() / 60_000L).toInt(),
-                            onValueChange = { minutes ->
-                                config.setXiaoaiModeMs(minutes.toLong() * 60_000L)
-                            },
-                        )
-                        NumberInputField(
-                            label = "LLM 模式持续时长（分钟，0=永久）",
-                            initialValue = (config.getLlmModeMs() / 60_000L).toInt(),
-                            onValueChange = { minutes ->
-                                config.setLlmModeMs(minutes.toLong() * 60_000L)
-                            },
-                        )
-                        TextInputField(
-                            initialValue = config.getCmdToLlm().joinToString("\n"),
-                            label = "切换到 LLM 的指令词",
-                            singleLine = false,
-                            placeholder = "每行一个",
-                            onValueChange = { text ->
-                                config.setCmdToLlm(text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList())
-                            },
-                        )
-                        TextInputField(
-                            initialValue = config.getCmdToXiaoai().joinToString("\n"),
-                            label = "切换到小爱的指令词",
-                            singleLine = false,
-                            placeholder = "每行一个",
-                            onValueChange = { text ->
-                                config.setCmdToXiaoai(text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList())
-                            },
-                        )
-                        TextInputField(
-                            initialValue = config.getCmdQueryMode().joinToString("\n"),
-                            label = "查询当前模式的提示词",
-                            singleLine = false,
-                            placeholder = "每行一个，默认含：你是谁",
-                            onValueChange = { text ->
-                                config.setCmdQueryMode(text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList())
-                            },
-                        )
-                        SwitchPreference(
-                            title = "拦截米家/设备类(General)（开发中）",
-                            summary = "米家富卡片文本走独立通道，当前版本暂不支持替换，敬请期待",
-                            checked = interceptGeneral,
-                            enabled = false, // 开发中：置灰不可用
-                            onCheckedChange = { v ->
-                                interceptGeneral = v
-                                config.setInterceptGeneral(v)
-                            },
-                        )
-                    }
-                    PresetSection(
-                        category = PresetManager.CATEGORY_MODE,
-                        title = "回答模式",
-                        config = config,
-                        context = context,
-                        onPresetApplied = { refreshTick++ },
-                    )
-                }
-            }
-
-            // ---------- 分组 3：生成参数 ----------
-            item(key = "generationTitle") {
-                SmallTitle("生成参数")
-            }
-            item(key = "generation") {
+            item(key = "engine") {
                 var refreshTick by remember { mutableStateOf(0) }
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
                     key(refreshTick) {
-                        // 温度 / Top P / Top K 均为「可空输入」：留空表示不传参，使用 API 默认值
-                        DecimalInputField(
-                            label = "温度（留空使用 API 默认）",
-                            initialValue = config.getTemperature(),
-                            onValueChange = { config.setTemperature(it) },
-                        )
-                        DecimalInputField(
-                            label = "Top P（留空使用 API 默认）",
-                            initialValue = config.getTopP(),
-                            onValueChange = { config.setTopP(it) },
-                        )
-                        NullableIntInputField(
-                            label = "Top K（留空使用 API 默认）",
-                            initialValue = config.getTopK(),
-                            onValueChange = { config.setTopK(it) },
-                        )
-                        // 受控组件用本地状态驱动 UI，避免 RemotePreferences 非响应式导致界面不更新
-                        var thinkingMode by remember { mutableStateOf(config.isThinkingMode()) }
-                        SwitchPreference(
-                            title = "思考模式",
-                            summary = "DeepSeek V4 通过请求体 thinking 控制（旧 reasoner 模型名已弃用）",
-                            checked = thinkingMode,
-                            onCheckedChange = {
-                                thinkingMode = it
-                                config.setThinkingMode(it)
-                            },
-                        )
-                        // 思考强度：仅思考模式下生效（DeepSeek 普通请求默认 high）
-                        var reasoningEffortIndex by remember {
-                            mutableStateOf(if (config.getReasoningEffort().trim().lowercase() == "max") 1 else 0)
+                        var engineIndex by remember {
+                            mutableStateOf(if (config.getXiaoaiEngine().trim().lowercase() == "fast") 1 else 0)
                         }
                         OverlayDropdownPreference(
-                            title = "思考强度",
-                            summary = "high / max（仅思考模式下生效）",
-                            items = listOf("high", "max"),
-                            selectedIndex = reasoningEffortIndex,
+                            title = "回答引擎",
+                            summary = "miclaw=超级小爱大模型(需登录小米账号)；fast=手机端快速云端",
+                            items = listOf("miclaw(大模型)", "fast(快速)"),
+                            selectedIndex = engineIndex,
                             onSelectedIndexChange = { index ->
-                                reasoningEffortIndex = index
-                                config.setReasoningEffort(if (index == 1) "max" else "high")
+                                engineIndex = index
+                                config.setXiaoaiEngine(if (index == 1) "fast" else "miclaw")
                             },
+                        )
+                        NumberInputField(
+                            label = "最长回答字数（0=不限制）",
+                            initialValue = config.getOpenAiMaxAnswerLen(),
+                            onValueChange = { config.setOpenAiMaxAnswerLen(it) },
+                        )
+                        NumberInputField(
+                            label = "快速引擎等待时长（毫秒）",
+                            initialValue = config.getFastWaitMs().toInt(),
+                            onValueChange = { config.setFastWaitMs(it.toLong()) },
+                        )
+                        NumberInputField(
+                            label = "大模型引擎等待时长（毫秒）",
+                            initialValue = config.getMiclawWaitMs().toInt(),
+                            onValueChange = { config.setMiclawWaitMs(it.toLong()) },
                         )
                         TextInputField(
                             initialValue = config.getSystemPrompt(),
                             label = "系统提示词",
+                            placeholder = "为空时不额外注入；填写后每次提问都会带上",
                             singleLine = false,
                             onValueChange = { config.setSystemPrompt(it) },
                         )
-                        NumberInputField(
-                            label = "超时时间（毫秒）",
-                            initialValue = config.getTimeoutMs().toInt(),
-                            onValueChange = { config.setTimeoutMs(it) },
-                        )
-                        NumberInputField(
-                            label = "最大 Token",
-                            initialValue = config.getMaxTokens(),
-                            onValueChange = { config.setMaxTokens(it) },
-                        )
-                        // 思考模式专属参数：推理 token 计入 max_tokens 总额且生成更慢，
-                        // 需独立于普通模式的预算与超时，故仅在思考模式开启时暴露
-                        if (thinkingMode) {
-                            NumberInputField(
-                                label = "思考模式超时（毫秒）",
-                                initialValue = config.getThinkingTimeoutMs().toInt(),
-                                onValueChange = { config.setThinkingTimeoutMs(it) },
-                            )
-                            NumberInputField(
-                                label = "思考模式最大 Token",
-                                initialValue = config.getThinkingMaxTokens(),
-                                onValueChange = { config.setThinkingMaxTokens(it) },
-                            )
-                        }
-                    }
-                    PresetSection(
-                        category = PresetManager.CATEGORY_GENERATION,
-                        title = "生成参数",
-                        config = config,
-                        context = context,
-                        onPresetApplied = { refreshTick++ },
-                    )
-                }
-            }
-
-            // ---------- 分组 3：会话设置 ----------
-            item(key = "sessionTitle") {
-                SmallTitle("会话设置")
-            }
-            item(key = "session") {
-                var refreshTick by remember { mutableStateOf(0) }
-                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    key(refreshTick) {
-                        // 受控组件用本地状态驱动 UI，避免 RemotePreferences 非响应式导致界面不更新
-                        var contextModeIndex by remember {
-                            mutableStateOf(if (config.getContextMode().trim().lowercase() == "independent") 1 else 0)
-                        }
-                        OverlayDropdownPreference(
-                            title = "会话模式",
-                            summary = "single 连续上下文 / independent 独立会话",
-                            items = listOf("single", "independent"),
-                            selectedIndex = contextModeIndex,
-                            onSelectedIndexChange = { index ->
-                                contextModeIndex = index
-                                config.setContextMode(if (index == 1) "independent" else "single")
+                        var forwardSystem by remember { mutableStateOf(config.isOpenAiForwardSystem()) }
+                        SwitchPreference(
+                            title = "转发 system 提示词",
+                            summary = "把请求 messages 中的 system 消息拼接后附加到提问前",
+                            checked = forwardSystem,
+                            onCheckedChange = {
+                                forwardSystem = it
+                                config.setOpenAiForwardSystem(it)
                             },
                         )
-                        NumberInputField(
-                            label = "会话窗口时长（毫秒）",
-                            initialValue = config.getContextWindowMs().toInt(),
-                            onValueChange = { config.setContextWindowMs(it) },
-                        )
-                        NumberInputField(
-                            label = "上下文长度（消息条数）",
-                            initialValue = config.getContextLength(),
-                            onValueChange = { config.setContextLength(it) },
+                        var forwardHistory by remember { mutableStateOf(config.isOpenAiForwardHistory()) }
+                        SwitchPreference(
+                            title = "转发多轮历史",
+                            summary = "把请求 messages 中的历史轮次一并转交超级小爱，保留上下文",
+                            checked = forwardHistory,
+                            onCheckedChange = {
+                                forwardHistory = it
+                                config.setOpenAiForwardHistory(it)
+                            },
                         )
                     }
                     PresetSection(
-                        category = PresetManager.CATEGORY_SESSION,
-                        title = "会话设置",
+                        category = PresetManager.CATEGORY_SERVER,
+                        title = "回答引擎",
                         config = config,
                         context = context,
                         onPresetApplied = { refreshTick++ },
@@ -1289,7 +1111,6 @@ private fun ConfigTabContent(
             }
         }
 
-        // 右侧纵向滚动条
         VerticalScrollBar(
             adapter = rememberScrollBarAdapter(listState),
             modifier = Modifier
@@ -1305,79 +1126,126 @@ private fun ConfigTabContent(
 // ====================================================================
 
 /**
- * Tab 2：统计 —— API 调用记录与 token 用量（持久化存储）。
+ * Tab 2：统计 —— 从本机接口服务的 /status 读取调用计数、平均耗时与最近调用记录。
  */
 @Composable
 private fun StatsTabContent(
+    config: ConfigStore?,
     context: Context,
     scope: kotlinx.coroutines.CoroutineScope,
     contentPadding: PaddingValues,
 ) {
     val listState = rememberLazyListState()
+    val port = config?.getOpenAiPort() ?: DEFAULT_OPENAI_PORT
+    val token = config?.getOpenAiToken().orEmpty()
+
+    // 服务端统计（/status）；null = 未探测到服务端
+    var status by remember { mutableStateOf<ServerStatus?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var refreshTick by remember { mutableStateOf(0) }
+
+    LaunchedEffect(refreshTick) {
+        loading = true
+        val st = withContext(Dispatchers.IO) { fetchServerStatus(port, token) }
+        status = st
+        loading = false
+    }
+
     Box {
         LazyColumn(
             state = listState,
             contentPadding = contentPadding,
         ) {
             item(key = "statsTitle") {
-                SmallTitle("API 统计")
+                SmallTitle("接口调用统计")
             }
             item(key = "stats") {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    var statsRefresh by remember { mutableStateOf(0) }
-                    key(statsRefresh) {
-                        val stats = StatsStore.readCallStats()
+                    val st = status
+                    if (st == null) {
                         Text(
-                            text = "总调用 ${stats.totalCalls} 次 · 失败 ${stats.totalFailures} 次",
+                            text = if (loading) {
+                                "正在读取服务端统计…"
+                            } else {
+                                "未连接到接口服务。\n请确认模块已启用、超级小爱正在运行，且端口 $port 未被占用。"
+                            },
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            fontSize = MiuixTheme.textStyles.body2.fontSize,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    } else {
+                        Text(
+                            text = "总调用 ${st.total} 次 · 成功 ${st.ok} 次 · 失败 ${st.fail} 次",
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                             fontSize = MiuixTheme.textStyles.body2.fontSize,
                         )
                         Text(
-                            text = "输入 ${stats.totalPromptTokens} tokens · 输出 ${stats.totalCompletionTokens} tokens · 合计 ${stats.totalTokens} tokens",
+                            text = "平均耗时 ${st.avgMs} ms · 进行中 ${st.inflight} 个请求 · 引擎 ${st.engine}",
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                             fontSize = MiuixTheme.textStyles.body2.fontSize,
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
-                        if (stats.recentCalls.isNotEmpty()) {
-                            TokenBarChart(calls = stats.recentCalls)
-                        }
-                        if (stats.recentCalls.isEmpty()) {
-                            Text(
-                                text = "暂无调用记录。手环真实调用（Hook 进程）的统计通过日志记录，可导出日志查看",
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                fontSize = MiuixTheme.textStyles.body2.fontSize,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            )
-                        } else {
-                            stats.recentCalls.take(5).forEach { call ->
-                                val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-                                    .format(java.util.Date(call.timestamp))
-                                val status = if (call.success) "✓" else "✗"
-                                Text(
-                                    text = "$time $status ${call.model} · ${call.promptTokens}+${call.completionTokens}tk · ${call.querySummary}",
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
-                                    fontSize = MiuixTheme.textStyles.body2.fontSize,
-                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                                    maxLines = 1,
-                                )
-                            }
+                        if (st.recent.isNotEmpty()) {
+                            LatencyBarChart(records = st.recent)
                         }
                     }
                     ArrowPreference(
-                        title = "刷新统计",
-                        summary = "重新读取持久化统计",
-                        onClick = { statsRefresh++ },
+                        title = if (loading) "正在刷新…" else "刷新统计",
+                        summary = "重新从接口服务读取调用统计",
+                        enabled = !loading,
+                        onClick = { refreshTick++ },
                     )
                     ArrowPreference(
                         title = "清除统计",
-                        summary = "清除持久化统计与当前进程的内存统计",
+                        summary = "清空服务端保存的调用计数与最近调用记录",
                         onClick = {
-                            StatsStore.clear()
-                            LlmClient.clearStats()
-                            statsRefresh++
-                            Toast.makeText(context, "统计已清除", Toast.LENGTH_SHORT).show()
+                            scope.launch(Dispatchers.IO) {
+                                val ok = httpPost(
+                                    url = "http://127.0.0.1:$port/stats/clear",
+                                    token = token,
+                                    json = "{}",
+                                ) != null
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(
+                                        context,
+                                        if (ok) "统计已清除" else "清除失败：服务端未响应",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                    refreshTick++
+                                }
+                            }
                         },
                     )
+                }
+            }
+
+            item(key = "recentTitle") {
+                SmallTitle("最近调用")
+            }
+            item(key = "recent") {
+                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    val recent = status?.recent.orEmpty()
+                    if (recent.isEmpty()) {
+                        Text(
+                            text = "暂无调用记录。\n调用接口后，这里会显示每次请求的时间、引擎、耗时与提问内容。",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            fontSize = MiuixTheme.textStyles.body2.fontSize,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    } else {
+                        recent.takeLast(10).reversed().forEach { call ->
+                            val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                                .format(java.util.Date(call.at))
+                            val mark = if (call.ok) "✓" else "✗"
+                            Text(
+                                text = "$time $mark ${call.engine} · ${call.ms}ms · ${call.len}字 · ${call.query}",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                fontSize = MiuixTheme.textStyles.body2.fontSize,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                maxLines = 2,
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1429,12 +1297,91 @@ private fun AboutTabContent(
         return
     }
     val listState = rememberLazyListState()
+    val port = config.getOpenAiPort()
+    val token = config.getOpenAiToken()
+    val lan = config.isOpenAiLan()
+    val lanIp = remember { localIpv4() }
+    val baseUrl = if (lan && lanIp != null) "http://$lanIp:$port" else "http://127.0.0.1:$port"
+
     Box {
         LazyColumn(
             state = listState,
             contentPadding = contentPadding,
         ) {
-            // ---------- 分组 1：日志 ----------
+            // ---------- 分组 1：接口信息 ----------
+            item(key = "apiTitle") {
+                SmallTitle("接口信息")
+            }
+            item(key = "api") {
+                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    var testing by remember { mutableStateOf(false) }
+                    ArrowPreference(
+                        title = if (testing) "正在测试…" else "测试接口",
+                        summary = "经本机接口发一条测试提问，验证服务端与超级小爱链路是否可用",
+                        enabled = !testing,
+                        onClick = {
+                            testing = true
+                            scope.launch(Dispatchers.IO) {
+                                val payload = "{\"model\":\"xiaomi-xiaoai\",\"messages\":[{\"role\":\"user\",\"content\":\"连接测试：请回答连接成功\"}],\"stream\":false}"
+                                val raw = httpPost(
+                                    url = "http://127.0.0.1:$port/v1/chat/completions",
+                                    token = token,
+                                    json = payload,
+                                    timeoutMs = 60_000,
+                                )
+                                // 兼容非流式 JSON 与流式 SSE 两种返回
+                                val reply = runCatching {
+                                    val obj = JSONObject(raw!!)
+                                    obj.getJSONArray("choices")
+                                        .getJSONObject(0)
+                                        .getJSONObject("message")
+                                        .optString("content")
+                                }.getOrNull() ?: raw?.lines()
+                                    ?.filter { it.startsWith("data:") && !it.contains("[DONE]") }
+                                    ?.joinToString("") { line ->
+                                        runCatching {
+                                            JSONObject(line.removePrefix("data:").trim())
+                                                .getJSONArray("choices")
+                                                .getJSONObject(0)
+                                                .getJSONObject("delta")
+                                                .optString("content")
+                                        }.getOrDefault("")
+                                    }
+                                withContext(Dispatchers.Main) {
+                                    testing = false
+                                    val msg = when {
+                                        raw == null -> "测试失败：服务端未响应，请确认模块已启用且超级小爱正在运行"
+                                        reply.isNullOrBlank() -> "测试失败：返回内容为空（可能超级小爱未登录或未就绪）"
+                                        else -> "测试成功：${reply.trim().take(40)}"
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                    )
+                    ArrowPreference(
+                        title = "复制 Base URL",
+                        summary = baseUrl,
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("OpenAI Base URL", baseUrl))
+                            Toast.makeText(context, "已复制：$baseUrl", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    Text(
+                        text = "GET  /v1/models\n" +
+                            "POST /v1/chat/completions（stream 可选）\n" +
+                            "GET  /status\n\n" +
+                            "鉴权：Authorization: Bearer <访问令牌>，令牌留空时不校验。\n" +
+                            "调用接口即由本机超级小爱真实操控手机执行并返回结果。",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        fontSize = MiuixTheme.textStyles.body2.fontSize,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
+
+            // ---------- 分组 2：日志 ----------
             item(key = "logTitle") {
                 SmallTitle("日志")
             }
@@ -1481,34 +1428,12 @@ private fun AboutTabContent(
                 }
             }
 
-            // ---------- 分组 2：关于 ----------
+            // ---------- 分组 3：关于 ----------
             item(key = "aboutTitle") {
                 SmallTitle("关于")
             }
             item(key = "about") {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    var testing by remember { mutableStateOf(false) }
-                    ArrowPreference(
-                        title = "测试连接",
-                        summary = "使用当前配置请求一次，验证 API Key 是否有效",
-                        enabled = !testing,
-                        onClick = {
-                            testing = true
-                            scope.launch(Dispatchers.IO) {
-                                LlmClient.init(config)
-                                val result = LlmClient.ask("settings-connection-test", "连接测试：请回答连接成功")
-                                withContext(Dispatchers.Main) {
-                                    testing = false
-                                    val msg = if (result.isNullOrBlank()) {
-                                        "连接失败：请检查 Base URL / API Key / 超时设置"
-                                    } else {
-                                        "连接成功：${result.trim().take(40)}"
-                                    }
-                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        },
-                    )
                     ArrowPreference(
                         title = "项目地址",
                         summary = "https://github.com/Little-White3110/mi-band-ai",
@@ -1520,7 +1445,7 @@ private fun AboutTabContent(
                         },
                     )
                     Text(
-                        text = "环上LLM · 版本 0.1.1",
+                        text = "环上LLM · 版本 0.2.0（手机小爱 · OpenAI 兼容接口）",
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                         fontSize = MiuixTheme.textStyles.body2.fontSize,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -1528,7 +1453,7 @@ private fun AboutTabContent(
                 }
             }
 
-            // ---------- 分组 3：主题设置入口（KSU 风格独立页面） ----------
+            // ---------- 分组 4：主题设置入口（KSU 风格独立页面） ----------
             item(key = "themeTitle") {
                 SmallTitle("主题设置")
             }
@@ -1805,28 +1730,28 @@ private fun DecimalInputField(
 }
 
 // ====================================================================
-// Token 柱状图 —— 统计页可视化组件
+// 耗时柱状图 —— 统计页可视化组件
 // ====================================================================
 
 /**
- * Token 用量柱状图 —— 展示最近若干次调用的输入（prompt）/ 输出（completion）token 占比。
+ * 调用耗时柱状图 —— 展示最近若干次接口调用的响应耗时（毫秒），失败请求以弱化色标出。
  */
 @Composable
-private fun TokenBarChart(
-    calls: List<LlmClient.ApiCallRecord>,
-    maxBars: Int = 10,
+private fun LatencyBarChart(
+    records: List<ServerCallRecord>,
+    maxBars: Int = 12,
 ) {
-    if (calls.isEmpty()) return
+    if (records.isEmpty()) return
 
-    val data = calls.takeLast(maxBars)
-    val maxToken = (data.maxOfOrNull { it.promptTokens + it.completionTokens } ?: 1).coerceAtLeast(1)
+    val data = records.takeLast(maxBars)
+    val maxMs = (data.maxOfOrNull { it.ms } ?: 1).coerceAtLeast(1)
 
-    val yStep = ((maxToken / 4).coerceAtLeast(1) + 9) / 10 * 10
+    // Y 轴刻度：把最大值向上取整到 100ms 的整数倍，四等分
+    val yStep = (((maxMs / 4).coerceAtLeast(1) + 99) / 100) * 100
     val yMax = yStep * 4
 
-    val promptColor = MiuixTheme.colorScheme.primary
-    val completionColor = MiuixTheme.colorScheme.primaryContainer
-    val failureColor = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.4f)
+    val okColor = MiuixTheme.colorScheme.primary
+    val failColor = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.4f)
     val textColor = MiuixTheme.colorScheme.onSurfaceVariantSummary
     val gridColor = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.15f)
 
@@ -1839,9 +1764,8 @@ private fun TokenBarChart(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            LegendDot(color = promptColor, label = "输入 token")
-            LegendDot(color = completionColor, label = "输出 token")
-            LegendDot(color = failureColor, label = "失败")
+            LegendDot(color = okColor, label = "成功")
+            LegendDot(color = failColor, label = "失败")
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -1891,34 +1815,18 @@ private fun TokenBarChart(
                 isAntiAlias = true
             }
             data.forEachIndexed { i, call ->
-                val total = call.promptTokens + call.completionTokens
-                val barH = if (total > 0) (total.toFloat() / yMax) * chartH else 0f
+                val barH = if (call.ms > 0) (call.ms.toFloat() / yMax) * chartH else 0f
                 val x = leftPad + i * slotW + (slotW - barW) / 2
                 val bottom = topPad + chartH
 
-                if (!call.success) {
-                    drawRect(
-                        color = failureColor,
-                        topLeft = Offset(x, bottom - barH),
-                        size = androidx.compose.ui.geometry.Size(barW, barH),
-                    )
-                } else {
-                    val promptH = if (call.promptTokens > 0) (call.promptTokens.toFloat() / yMax) * chartH else 0f
-                    val completionH = if (call.completionTokens > 0) (call.completionTokens.toFloat() / yMax) * chartH else 0f
-                    drawRect(
-                        color = completionColor,
-                        topLeft = Offset(x, bottom - completionH),
-                        size = androidx.compose.ui.geometry.Size(barW, completionH),
-                    )
-                    drawRect(
-                        color = promptColor,
-                        topLeft = Offset(x, bottom - completionH - promptH),
-                        size = androidx.compose.ui.geometry.Size(barW, promptH),
-                    )
-                }
+                drawRect(
+                    color = if (call.ok) okColor else failColor,
+                    topLeft = Offset(x, bottom - barH),
+                    size = androidx.compose.ui.geometry.Size(barW, barH),
+                )
 
                 val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
-                    .format(java.util.Date(call.timestamp))
+                    .format(java.util.Date(call.at))
                 drawContext.canvas.nativeCanvas.drawText(
                     time,
                     leftPad + i * slotW + slotW / 2,
@@ -1954,3 +1862,122 @@ private fun LegendDot(color: Color, label: String) {
         )
     }
 }
+
+// ====================================================================
+// 接口服务状态读取 —— 统计页与关于页共用
+// ====================================================================
+
+/** 接口服务默认监听端口，与 ConfigKeys.DEFAULT_OPENAI_PORT 保持一致 */
+private const val DEFAULT_OPENAI_PORT = ConfigKeys.DEFAULT_OPENAI_PORT
+
+/** 单次接口调用记录（GET /status 返回的 recent 数组元素） */
+private data class ServerCallRecord(
+    val at: Long,
+    val model: String,
+    val engine: String,
+    val query: String,
+    val ms: Long,
+    val ok: Boolean,
+    val len: Int,
+)
+
+/** 接口服务运行状态与累计统计（GET /status 的解析结果） */
+private data class ServerStatus(
+    val running: Boolean,
+    val port: Int,
+    val lan: Boolean,
+    val engine: String,
+    val osbotConnected: Boolean,
+    val fastReady: Boolean,
+    val total: Int,
+    val ok: Int,
+    val fail: Int,
+    val avgMs: Long,
+    val inflight: Int,
+    val recent: List<ServerCallRecord>,
+)
+
+/** 携带鉴权头发起一次 HTTP 请求并返回响应体，网络异常或非 2xx 时返回 null */
+private fun httpExchange(
+    url: String,
+    method: String,
+    token: String,
+    body: String? = null,
+    timeoutMs: Int = 30_000,
+): String? = runCatching {
+    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+        requestMethod = method
+        connectTimeout = timeoutMs
+        readTimeout = timeoutMs
+        setRequestProperty("Accept", "application/json")
+        if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+        if (body != null) {
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        }
+    }
+    if (body != null) {
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+    }
+    val code = conn.responseCode
+    val raw = (if (code in 200..299) conn.inputStream else conn.errorStream)
+        ?.use { it.readBytes().toString(Charsets.UTF_8) }
+    conn.disconnect()
+    if (code in 200..299) raw ?: "" else null
+}.getOrNull()
+
+/** 向本机接口服务 POST 一段 JSON，返回响应体；失败返回 null */
+private fun httpPost(
+    url: String,
+    token: String,
+    json: String,
+    timeoutMs: Int = 30_000,
+): String? = httpExchange(url, "POST", token, json, timeoutMs)
+
+/** 读取本机接口服务的 /status 并解析；服务未启动或响应异常时返回 null */
+private fun fetchServerStatus(port: Int, token: String): ServerStatus? = runCatching {
+    val text = httpExchange("http://127.0.0.1:$port/status", "GET", token, null, 4_000)
+        ?: return@runCatching null
+    val root = JSONObject(text)
+    val stats = root.optJSONObject("stats") ?: JSONObject()
+    val arr = root.optJSONArray("recent") ?: JSONArray()
+    val recent = ArrayList<ServerCallRecord>(arr.length())
+    for (i in 0 until arr.length()) {
+        val item = arr.optJSONObject(i) ?: continue
+        recent += ServerCallRecord(
+            at = item.optLong("at"),
+            model = item.optString("model"),
+            engine = item.optString("engine"),
+            query = item.optString("query"),
+            ms = item.optLong("ms"),
+            ok = item.optBoolean("ok"),
+            len = item.optInt("len"),
+        )
+    }
+    // 服务端 recent 为最新在前，反转为时间升序，便于柱状图从左到右按时间绘制
+    recent.reverse()
+    ServerStatus(
+        running = root.optBoolean("running"),
+        port = root.optInt("port", port),
+        lan = root.optBoolean("lan"),
+        engine = root.optString("engine_default", "miclaw"),
+        osbotConnected = root.optBoolean("osbot_connected"),
+        fastReady = root.optBoolean("fast_ready"),
+        total = stats.optInt("total"),
+        ok = stats.optInt("ok"),
+        fail = stats.optInt("fail"),
+        avgMs = stats.optLong("avg_ms"),
+        inflight = stats.optInt("inflight"),
+        recent = recent,
+    )
+}.getOrNull()
+
+/** 取本机局域网 IPv4 地址；非局域网环境或获取失败时返回 null */
+private fun localIpv4(): String? = runCatching {
+    NetworkInterface.getNetworkInterfaces().toList()
+        .filter { it.isUp && !it.isLoopback && !it.isVirtual }
+        .flatMap { it.inetAddresses.toList() }
+        .filterIsInstance<Inet4Address>()
+        .firstOrNull { it.isSiteLocalAddress }
+        ?.hostAddress
+}.getOrNull()

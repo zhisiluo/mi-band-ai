@@ -1,9 +1,9 @@
 id=llm.miband.littlewhite
 name=环上LLM
 author=mi-band-ai
-description=在小米运动健康 App 中拦截小爱 WebSocket 消息并替换为 LLM 回答
+description=把本机超级小爱的回答能力封装为标准 OpenAI 兼容 HTTP 接口，供局域网 AI 调用
 minApi=102
 minApiVersion=102
 targetApiVersion=102
-version=0.2.0
-versionCode=4
+version=0.3.0
+versionCode=5

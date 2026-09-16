@@ -39,10 +39,26 @@ object FastXiaoaiEngine {
     /** 未认领的 waiter 只在该时长内接受分片接管，避免上一条请求的迟到分片污染新请求 */
     private const val CLAIM_WINDOW_MS = 10_000L
 
+    /** API 模式默认等待上限（长回答云端回流更久） */
+    private const val API_WAIT_MS = 30_000L
+
+    /** API 模式静默收口窗口：长回答分片间隔明显大于短答，取更长避免被拦腰截断 */
+    private const val API_IDLE_FINISH_MS = 2_500L
+
     private var classLoader: ClassLoader? = null
     private var config: ConfigStore? = null
 
-    private class Waiter(val id: Int) {
+    /**
+     * @param maxLen       返回长度上限，<=0 表示不截断（API 模式）
+     * @param keepMarkdown true 保留 markdown 原文结构（API 模式）；false 压成手环可读的纯文本
+     * @param idleFinishMs 聚合到内容后，多久无新分片即认为流已结束
+     */
+    private class Waiter(
+        val id: Int,
+        val maxLen: Int,
+        val keepMarkdown: Boolean,
+        val idleFinishMs: Long,
+    ) {
         val latch = CountDownLatch(1)
         val dialog = AtomicReference<String?>(null)
         val sb = StringBuilder()
@@ -129,10 +145,11 @@ object FastXiaoaiEngine {
         w.sb.append(text)
         w.lastChunkAt = System.currentTimeMillis()
         val s = w.sb
-        // 够长、或已累积成句且以句末标点收尾，即完成（后台常无独立 <FINAL> 分片）
-        if (s.length >= MAX_ANSWER_LEN ||
-            (s.length >= 24 && s.last() in "。！？!?")
-        ) {
+        // 够长即完成；手环短答模式下另允许"已累积成句且以句末标点收尾"提前收口
+        // （后台常无独立 <FINAL> 分片）。API 模式保留完整回答，只走 <FINAL> 与静默收口。
+        val longEnough = w.maxLen > 0 && s.length >= w.maxLen
+        val sentenceDone = !w.keepMarkdown && s.length >= 24 && s.last() in "。！？!?"
+        if (longEnough || sentenceDone) {
             finish(w)
         }
     }
@@ -146,17 +163,19 @@ object FastXiaoaiEngine {
 
     private fun finish(w: Waiter) {
         if (w.result.get() != null) return
-        w.result.set(cleanAndTruncate(w.sb.toString()))
+        pending.remove(w.id)
+        w.result.set(clean(w.sb.toString(), w.keepMarkdown, w.maxLen))
         w.latch.countDown()
     }
 
     /**
      * 静默收口看门狗：部分短答案（如"1+1等于2"）无句末标点、也不会收到 <FINAL>，
-     * 旧逻辑只能干等到 WAIT_MS 超时。这里在已聚合到内容后，若 IDLE_FINISH_MS 内无新分片，
+     * 旧逻辑只能干等到超时。这里在已聚合到内容后，若 idleFinishMs 内无新分片，
      * 即认为流已结束并按现有内容完成。仅在 sb 非空时才收口，避免把纯回显当成答案。
+     * 到达等待上限时同样按已聚合内容收口，确保长回答不会因缺少 <FINAL> 被整条丢弃。
      */
-    private fun startIdleWatchdog(w: Waiter) {
-        val deadline = System.currentTimeMillis() + WAIT_MS + 1_000L
+    private fun startIdleWatchdog(w: Waiter, waitMs: Long) {
+        val deadline = System.currentTimeMillis() + waitMs + 1_000L
         Thread({
             while (true) {
                 try {
@@ -165,16 +184,23 @@ object FastXiaoaiEngine {
                     return@Thread
                 }
                 if (w.latch.count == 0L) return@Thread
-                if (System.currentTimeMillis() > deadline) return@Thread
+                if (System.currentTimeMillis() > deadline) {
+                    if (w.sb.isNotEmpty()) {
+                        LogCollector.i(TAG, "#${w.id} 到达等待上限，按已聚合内容收口 len=${w.sb.length}")
+                        finish(w)
+                    }
+                    return@Thread
+                }
                 if (w.sb.isEmpty()) continue
                 val last = w.lastChunkAt
-                if (last > 0 && System.currentTimeMillis() - last >= IDLE_FINISH_MS) {
-                    LogCollector.i(TAG, "#${w.id} 静默 ${IDLE_FINISH_MS}ms 无新分片，按已聚合内容收口 len=${w.sb.length}")
+                if (last > 0 && System.currentTimeMillis() - last >= w.idleFinishMs) {
+                    LogCollector.i(TAG, "#${w.id} 静默 ${w.idleFinishMs}ms 无新分片，按已聚合内容收口 len=${w.sb.length}")
                     finish(w)
                     return@Thread
                 }
             }
         }, "FastXiaoaiIdle").apply { isDaemon = true }.start()
+    }
     }
 
     /** H0 入站路径：fullName 以 Template 开头时投递（ToastStream 分片 / Toast 单条） */
@@ -196,32 +222,71 @@ object FastXiaoaiEngine {
         }
     }
 
-    /** 去 HTML 标签与 markdown 符号、折叠空白、截断到手环可显示长度 */
-    private fun cleanAndTruncate(raw: String): String? {
-        var s = raw.replace(Regex("<[^>]*>"), " ")
+    /**
+     * 结果清洗。
+     * - 手环短答模式（keepMarkdown=false）：去 HTML 标签与 markdown 符号、折叠空白、按 maxLen 截断；
+     * - API 模式（keepMarkdown=true）：只去 HTML 标签与首尾空白，保留 markdown 原文与换行。
+     */
+    private fun clean(raw: String, keepMarkdown: Boolean, maxLen: Int): String? {
+        var s = if (keepMarkdown) {
+            raw.replace(Regex("<[^>]*>"), "")
+        } else {
+            raw.replace(Regex("<[^>]*>"), " ")
+        }
         s = s.replace(Regex("<[^>]*$"), "")
-        s = s.replace(Regex("[#*`>|_]"), " ")
-        s = s.replace(Regex("\\s+"), " ").trim()
-        if (s.length > MAX_ANSWER_LEN) {
-            s = s.substring(0, MAX_ANSWER_LEN).trimEnd() + "…"
+        if (keepMarkdown) {
+            s = s.trim()
+        } else {
+            s = s.replace(Regex("[#*`>|_]"), " ")
+            s = s.replace(Regex("\\s+"), " ").trim()
+        }
+        if (maxLen > 0 && s.length > maxLen) {
+            s = s.substring(0, maxLen).trimEnd() + "…"
         }
         return s.takeIf { it.isNotBlank() }
     }
 
-    fun ask(query: String): String? {
+    /** 手环短答语义：截断到可显示长度、压成纯文本 */
+    fun ask(query: String): String? =
+        askInternal(query, MAX_ANSWER_LEN, false, WAIT_MS, IDLE_FINISH_MS)
+
+    /**
+     * API 模式：面向 OpenAI 接口调用方。
+     * 默认不截断、保留 markdown 原文，等待与静默窗口也更宽松——
+     * 长回答的分片间隔可能超过短答模式的静默阈值，用短答参数会把回答拦腰截断。
+     */
+    fun askLong(
+        query: String,
+        maxLen: Int = 0,
+        keepMarkdown: Boolean = true,
+        timeoutMs: Long = API_WAIT_MS,
+        idleMs: Long = API_IDLE_FINISH_MS,
+    ): String? = askInternal(query, maxLen, keepMarkdown, timeoutMs, idleMs)
+
+    private fun askInternal(
+        query: String,
+        maxLen: Int,
+        keepMarkdown: Boolean,
+        waitMs: Long,
+        idleMs: Long,
+    ): String? {
         val cl = classLoader ?: return null
         if (query.isBlank()) return null
-        val w = Waiter(seq.incrementAndGet())
+        val w = Waiter(seq.incrementAndGet(), maxLen, keepMarkdown, idleMs)
         w.inputQuery = query
         w.injectedQuery = buildInjectedQuery(query)
         pending[w.id] = w
-        startIdleWatchdog(w)
+        startIdleWatchdog(w, waitMs)
         try {
             if (!inject(cl, w.injectedQuery)) {
                 return null
             }
-            val ok = w.latch.await(WAIT_MS, TimeUnit.MILLISECONDS)
-            val ans = if (ok) w.result.get() else null
+            if (!w.latch.await(waitMs, TimeUnit.MILLISECONDS) && w.sb.isNotEmpty()) {
+                // 已拿到部分回答但流迟迟不收尾：按现有内容收口，好过整条丢弃
+                LogCollector.i(TAG, "#${w.id} 等待 ${waitMs}ms 超时，按已聚合内容收口 len=${w.sb.length}")
+                finish(w)
+            }
+            val ans = w.result.get()
             if (ans == null) LogCollector.w(TAG, "#${w.id} fast 注入后未聚合到流式回答 query=${query.take(20)}")
             return ans
         } catch (t: Throwable) {

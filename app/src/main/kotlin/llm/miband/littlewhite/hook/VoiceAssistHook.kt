@@ -46,10 +46,11 @@ class VoiceAssistHook(
             // ActivityThread.currentApplication() 常为 null，导致宿主进程 LogCollector.init 未生效；
             // 此处已稳定拿到宿主 Context，落盘到 <宿主 cacheDir>/logs/llm.log，绕过 log.tag=E 的 logcat 过滤。
             LogCollector.init(c)
-            XiaoaiAgentServer.start(classLoader, c)
+            XiaoaiEngine.start(classLoader, c)
             FastXiaoaiEngine.init(classLoader, config)
+            OpenAiServer.start(config)
             installToastCapture()
-            LogCollector.i(tag, "voiceassist 注入完成：osbot 桥服务端 + fast 捕获已就绪")
+            LogCollector.i(tag, "voiceassist 注入完成：OpenAI 接口 + fast 捕获已就绪")
         }, "VoiceAssistHookInit").apply { isDaemon = true }.start()
     }
 
