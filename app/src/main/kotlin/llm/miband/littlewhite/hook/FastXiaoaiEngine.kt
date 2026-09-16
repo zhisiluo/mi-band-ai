@@ -201,7 +201,6 @@ object FastXiaoaiEngine {
             }
         }, "FastXiaoaiIdle").apply { isDaemon = true }.start()
     }
-    }
 
     /** H0 入站路径：fullName 以 Template 开头时投递（ToastStream 分片 / Toast 单条） */
     fun onToast(fullName: String?, dialogId: String?, text: String?) {
