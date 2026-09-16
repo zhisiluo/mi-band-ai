@@ -597,10 +597,10 @@ adb shell "for p in $(pidof com.mi.health com.miui.voiceassist); do echo PID=$p;
 - [ ] **Step 2: 写最小探针 Hook（只读日志，不改行为）**
 
 ```kotlin
-package llm.miband.littlewhite.hook
+package com.zhisiluo.superxiaoai.hook
 
 import io.github.libxposed.api.XposedModule
-import llm.miband.littlewhite.log.LogCollector
+import com.zhisiluo.superxiaoai.log.LogCollector
 
 /**
  * 超级小爱（com.miui.voiceassist）探针：仅确认注入成功与 osbot 类可达，不修改任何行为。
@@ -722,7 +722,7 @@ adb shell "su -c 'ls /data/data/com.miui.voiceassist/files'"
 写入 `/data/data/com.miui.voiceassist/files/agents/com.mi.health/config.json`：
 
 ```json
-{ "id":"com.mi.health", "name":"环上LLM", "enabled":true,
+{ "id":"com.mi.health", "name":"超级小爱", "enabled":true,
   "type":"builtin", "execution_mode":"main",
   "prompt_file":"prompt.md", "tools_allowlist":[], "preload_tools":[],
   "max_iterations":3, "version":"0.0.1" }

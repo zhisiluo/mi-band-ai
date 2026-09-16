@@ -1,4 +1,4 @@
-# ---- 环上LLM 混淆规则（LSPosed 模块）----
+# ---- 超级小爱 混淆规则（LSPosed 模块）----
 
 # Modern Xposed API 官方推荐的保留规则：
 # 1. 模块入口类必须保留，且不能被混淆（框架通过 java_init.list 反射实例化）
@@ -22,5 +22,5 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
--keep class llm.miband.littlewhite.hook.Bridge { *; }
--keep class llm.miband.littlewhite.hook.FastXiaoaiEngine { *; }
+-keep class com.zhisiluo.superxiaoai.hook.Bridge { *; }
+-keep class com.zhisiluo.superxiaoai.hook.FastXiaoaiEngine { *; }

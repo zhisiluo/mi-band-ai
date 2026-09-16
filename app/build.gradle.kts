@@ -5,9 +5,9 @@ plugins {
     alias(libs.plugins.kotlinSerialization)
 }
 
-// 环上LLM —— LSPosed 模块（Modern Xposed API 102）
+// 超级小爱 —— LSPosed 模块（Modern Xposed API 102）
 android {
-    namespace = "llm.miband.littlewhite"
+    namespace = "com.zhisiluo.superxiaoai"
     // AGP 9.x 的 compileSdk 表达式 DSL。
     // libxposed 102 要求 compileSdk>=37，使用子系统 37.0（platforms/android-37.0）
     compileSdk {
@@ -17,11 +17,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "llm.miband.littlewhite"
+        applicationId = "com.zhisiluo.superxiaoai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.3.0"
     }
 
     buildTypes {

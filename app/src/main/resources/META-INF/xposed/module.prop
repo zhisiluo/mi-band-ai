@@ -1,5 +1,5 @@
-id=llm.miband.littlewhite
-name=环上LLM
+id=com.zhisiluo.superxiaoai
+name=超级小爱
 author=mi-band-ai
 description=把本机超级小爱的回答能力封装为标准 OpenAI 兼容 HTTP 接口，供局域网 AI 调用
 minApi=102

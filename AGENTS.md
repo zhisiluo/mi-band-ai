@@ -1,10 +1,10 @@
-# agents.md — mi-band-ai（环上LLM）
+# agents.md — mi-band-ai（超级小爱）
 
 本文件为 AI 智能体（Agent）提供本仓库的完整上下文，帮助你快速理解代码库结构、构建方式与开发约定。
 
 ## 项目概览
 
-**项目名称**：环上LLM（包名 `llm.miband.littlewhite`，模块 ID `llm.miband.littlewhite`）
+**项目名称**：超级小爱（包名 `com.zhisiluo.superxiaoai`，模块 ID `com.zhisiluo.superxiaoai`）
 
 **项目定位**：一个纯 LSPosed（Xposed）Android 模块，注入小米运动健康 App（`com.mi.health`，即连接小米手环/手表的 App）进程内：
 
@@ -104,7 +104,7 @@ mi-band-ai/
 
 配置共享通过 libxposed **Remote Preferences**（group = `"config"`）：Hook 侧 `XposedModule.getRemotePreferences()` 只读，App 侧 `XposedService.getRemotePreferences()` 可写，变更通过 `OnSharedPreferenceChangeListener` 实时生效。
 
-统计跨进程：Hook 进程因 Remote Prefs 只读，改用 `StatsContentProvider`（exposed ContentProvider，authority `llm.miband.littlewhite.stats`）把统计快照推到模块 App 落盘（SharedPreferences `"llm_stats"`）。
+统计跨进程：Hook 进程因 Remote Prefs 只读，改用 `StatsContentProvider`（exposed ContentProvider，authority `com.zhisiluo.superxiaoai.stats`）把统计快照推到模块 App 落盘（SharedPreferences `"llm_stats"`）。
 
 ### Hook 链路（com.mi.health，多道容错，任一成功即可工作）
 
@@ -194,7 +194,7 @@ mi-band-ai/
 
 1. **Hook 安全性**：所有 Hook 必须异常隔离（`ExceptionMode.PROTECTIVE` + try-catch），任何异常不得透传干扰宿主；日志自动脱敏（`sk-` 密钥与 Authorization/Bearer 头）；
 2. **依赖克制**：不引入 OkHttp 等可能与宿主冲突的依赖，HTTP 使用 `java.net.HttpURLConnection`；
-3. **配置文件**：`scope.list` 含 `com.mi.health` 与 `com.miui.voiceassist`；`java_init.list` 入口为 `llm.miband.littlewhite.MainModule`；`module.prop` 要求 minApi=102；
+3. **配置文件**：`scope.list` 含 `com.mi.health` 与 `com.miui.voiceassist`；`java_init.list` 入口为 `com.zhisiluo.superxiaoai.MainModule`；`module.prop` 要求 minApi=102；
 4. **Proguard**：`proguard-rules.pro` 保留 Xposed 入口、Miuix/Compose/kotlinx.serialization 生成类，并 `-adaptresourcefilecontents META-INF/xposed/java_init.list`；
 5. **逆向资料**：`com.mi.health` v3.58.0 的完整逆向笔记在 `docs/reverse-notes.md`；手机端 `com.miui.voiceassist`（超级小爱）逆向与可行性在 `docs/xiaoai_phone_integration_feasibility.md`；fast 档注入点 `v51.m0.sendNlpRequest`、捕获点 `n31.o0.H0`/`ic1.a.sendStreamData` 均为**混淆类名，随小爱 OTA 可能变化**，失效时自动降级放行原始；
 6. **UI 风格**：设置页使用 Miuix 设计语言，主题页移植自 KernelSU Manager（`FloatingBottomBar` 源码来自 compose-miuix-ui example → KernelSU，Apache-2.0 许可）。

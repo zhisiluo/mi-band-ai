@@ -1,4 +1,4 @@
-// 环上LLM —— LSPosed 模块工程
+// 超级小爱 —— LSPosed 模块工程
 // 插件与依赖仓库统一在此声明
 pluginManagement {
     repositories {
@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "mi-band-ai"
+rootProject.name = "super-xiaoai"
 include(":app")
