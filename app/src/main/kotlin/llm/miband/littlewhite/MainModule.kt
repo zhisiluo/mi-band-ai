@@ -21,8 +21,6 @@ import llm.miband.littlewhite.log.LogCollector
  * - [onModuleLoaded]：早于一切包回调触发，幂等初始化 ConfigStore；
  * - [onPackageLoaded]：包名匹配 com.miui.voiceassist 时装配 [VoiceAssistHook]，
  *   在超级小爱主进程内接入本机小爱引擎，并对外暴露 OpenAI 兼容 HTTP 接口。
- *
- * 说明：原先面向小米运动健康（com.mi.health）的手环 WebSocket 注入分支已整体移除。
  */
 class MainModule : XposedModule() {
 

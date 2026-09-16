@@ -78,8 +78,6 @@ import llm.miband.littlewhite.LsposedBinding
 import llm.miband.littlewhite.config.ConfigKeys
 import llm.miband.littlewhite.config.ConfigStore
 import llm.miband.littlewhite.config.PresetManager
-import llm.miband.littlewhite.config.StatsStore
-import llm.miband.littlewhite.hook.LlmClient
 import llm.miband.littlewhite.hook.Bridge
 import androidx.compose.runtime.LaunchedEffect
 import llm.miband.littlewhite.log.LogCollector
@@ -166,7 +164,6 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     PresetManager.init(context)
-    StatsStore.init(context)
     val scope = rememberCoroutineScope()
 
     val config = binding?.config
@@ -345,11 +342,6 @@ private fun StatusTabContent(
     val listState = rememberLazyListState()
     // 协程作用域（与上方读取 scope 列表的局部变量区分命名）
     val uiScope = rememberCoroutineScope()
-    // 是否正在执行 Root 重启
-    var restarting by remember { mutableStateOf(false) }
-    // 重启二次确认弹窗
-    var showRestartDialog by remember { mutableStateOf(false) }
-
     // 手机端小爱(osbot)桥服务端运行状态
     var xiaoaiStatus by remember { mutableStateOf<XiaoaiStatus?>(null) }
     var xiaoaiChecked by remember { mutableStateOf(false) }
@@ -374,8 +366,8 @@ private fun StatusTabContent(
     val frameworkVersionCode = remember { runCatching { service?.frameworkVersionCode }.getOrNull() ?: 0L }
     val scope = remember { runCatching { service?.scope }.getOrNull() ?: emptyList() }
     val targets = remember { runCatching { service?.runningTargets }.getOrNull() ?: emptyList() }
-    val targetInScope = scope.any { it.equals("com.mi.health", ignoreCase = true) }
-    val miHealthTarget = targets.firstOrNull { it.processName.contains("com.mi.health") }
+    val targetInScope = scope.any { it.equals(VOICE_ASSIST_PACKAGE, ignoreCase = true) }
+    val vaTarget = targets.firstOrNull { it.processName.contains(VOICE_ASSIST_PACKAGE) }
 
     // 是否已激活（Service 绑定成功）
     val activated = binding != null
@@ -498,7 +490,7 @@ private fun StatusTabContent(
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     InfoRow(
                         label = "目标应用",
-                        value = "com.mi.health",
+                        value = VOICE_ASSIST_PACKAGE,
                         tag = if (targetInScope) "已勾选" else "未勾选",
                         tagBg = if (targetInScope) MiuixTheme.colorScheme.primaryContainer else MiuixTheme.colorScheme.errorContainer,
                         tagFg = if (targetInScope) MiuixTheme.colorScheme.onPrimaryContainer else MiuixTheme.colorScheme.onErrorContainer,
@@ -512,7 +504,7 @@ private fun StatusTabContent(
             }
             item(key = "hook") {
                 Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    val targetInfo = miHealthTarget
+                    val targetInfo = vaTarget
                     val statusText = when {
                         targetInfo == null -> "未运行"
                         targetInfo.state == HookedTarget.State.UP_TO_DATE -> "运行中 · 已加载"
@@ -527,7 +519,7 @@ private fun StatusTabContent(
                         else -> MiuixTheme.colorScheme.tertiaryContainer
                     }
                     InfoRow(
-                        label = "com.mi.health",
+                        label = VOICE_ASSIST_PACKAGE,
                         value = "[pid=${targetInfo?.pid ?: "?"}]",
                         tag = statusText,
                         tagBg = statusColor,
@@ -624,40 +616,17 @@ private fun StatusTabContent(
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     ArrowPreference(
                         title = "自启动设置",
-                        summary = "为小米运动健康开启自启动权限，保证后台常驻",
+                        summary = "为超级小爱开启自启动权限，保证后台常驻",
                         onClick = {
-                            openAutoStartSettings(context, TARGET_APP_PACKAGE)
+                            openAutoStartSettings(context, VOICE_ASSIST_PACKAGE)
                         },
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                     ArrowPreference(
                         title = "省电策略设置",
-                        summary = "设置小米运动健康的省电策略，避免后台被系统限制",
+                        summary = "设置超级小爱的省电策略，避免后台被系统限制",
                         onClick = {
-                            openBatteryOptimizationSettings(context, TARGET_APP_PACKAGE)
-                        },
-                    )
-                }
-            }
-
-            // ---------- 重启目标应用（需 Root） ----------
-            item(key = "restartTitle") {
-                Spacer(modifier = Modifier.height(8.dp))
-                SmallTitle("目标应用")
-            }
-            item(key = "restart") {
-                Card(modifier = Modifier.padding(horizontal = 12.dp)) {
-                    ArrowPreference(
-                        title = "重启小米运动健康",
-                        summary = if (restarting) {
-                            "正在以 Root 权限重启…"
-                        } else {
-                            "以 Root 权限强制重启 com.mi.health，使模块 Hook 立即生效"
-                        },
-                        enabled = !restarting,
-                        onClick = {
-                            // 二次确认后再执行 Root 重启
-                            showRestartDialog = true
+                            openBatteryOptimizationSettings(context, VOICE_ASSIST_PACKAGE)
                         },
                     )
                 }
@@ -675,45 +644,6 @@ private fun StatusTabContent(
                 .fillMaxHeight(),
             trackPadding = contentPadding,
         )
-    }
-
-    // 重启二次确认对话框（StatusTabContent 位于 SettingsScreen 的 Scaffold 内，满足 Overlay 宿主要求）
-    OverlayDialog(
-        show = showRestartDialog,
-        title = "重启小米运动健康",
-        summary = "将以 Root 权限强制重启 com.mi.health，模块 Hook 会重新加载生效",
-        onDismissRequest = { showRestartDialog = false },
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            TextButton(
-                text = "取消",
-                modifier = Modifier.weight(1f),
-                onClick = { showRestartDialog = false },
-            )
-            TextButton(
-                text = "确认重启",
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-                onClick = {
-                    showRestartDialog = false
-                    restarting = true
-                    uiScope.launch(Dispatchers.IO) {
-                        val ok = restartAppWithRoot(TARGET_APP_PACKAGE)
-                        withContext(Dispatchers.Main) {
-                            restarting = false
-                            Toast.makeText(
-                                context,
-                                if (ok) "已重启小米运动健康" else "重启失败：请检查 Root 授权",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        }
-                    }
-                },
-            )
-        }
     }
 
     // 重启超级小爱二次确认对话框
@@ -760,32 +690,6 @@ private fun StatusTabContent(
                 },
             )
         }
-    }
-}
-
-/** 目标应用包名（重启/状态展示统一使用） */
-private const val TARGET_APP_PACKAGE = "com.mi.health"
-
-/**
- * 以 Root 权限强制重启目标应用（com.mi.health）。
- *
- * 通过 su 执行 am force-stop 强制停止目标应用，等待短暂时间后
- * 使用 monkey 重新拉起其 Launcher Activity，使模块 Hook 重新注入生效。
- * Root 不可用或授权被拒时返回 false。
- */
-private fun restartAppWithRoot(packageName: String): Boolean {
-    return try {
-        // su -c 直接执行合并命令；失败（无 Root/授权被拒）时 exit code 非 0
-        val process = ProcessBuilder("su", "-c", "am force-stop $packageName && sleep 1 && monkey -p $packageName -c android.intent.category.LAUNCHER 1")
-            .redirectErrorStream(true)
-            .start()
-        // 读取输出，避免管道缓冲阻塞；最多等待 15s
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        process.waitFor(15, TimeUnit.SECONDS)
-        // force-stop 成功 + monkey 注入事件成功才算重启完成
-        process.exitValue() == 0 && output.contains("Events injected: 1")
-    } catch (_: Throwable) {
-        false
     }
 }
 

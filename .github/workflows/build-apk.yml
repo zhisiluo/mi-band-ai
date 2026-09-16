@@ -25,6 +25,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 仓库内 local.properties 记录的是开发机（Windows）SDK 路径，
+      # 在 CI 上会覆盖 runner 的 SDK 定位，这里强制写回 runner 实际路径。
+      - name: Pin sdk.dir to runner SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
